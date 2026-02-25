@@ -196,8 +196,8 @@ ${bodyContent}
       }
 
       // If even compressed version is too large, warn but return the optimized version
-      console.warn('📋 Returning optimized HTML that preserves all visible content despite size limit');
-      return finalHTML;
+      console.warn('📋 Optimized HTML still too large; hard-truncating to MAX_HTML_LENGTH to fit extension limits.');
+    return finalHTML.slice(0, maxLength);
     }
 
     return finalHTML;

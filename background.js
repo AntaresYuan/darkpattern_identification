@@ -27,79 +27,99 @@ async function withDebugger(tabId, fn) {
   }
 }
 
-async function getVisibleBottomY(tabId) {
+async function evalInPage(tabId, expression) {
   const { result } = await cdpSend(tabId, "Runtime.evaluate", {
-    expression: `
-      (() => {
-        // 计算“真正有尺寸、真正渲染出来的元素”的最大 bottom
-        const els = Array.from(document.querySelectorAll("body *"));
-        let maxBottom = 0;
-
-        for (const el of els) {
-          // 跳过不可见/无尺寸元素
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) continue;
-
-          // 有些站点会把很大的占位元素放在底部，但内部没内容；这里用一个更稳的过滤：
-          // 如果元素完全透明/不可见，也跳过（不完美但对电商页很有效）
-          const cs = window.getComputedStyle(el);
-          if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") continue;
-
-          if (r.bottom > maxBottom) maxBottom = r.bottom;
-        }
-
-        // 转成文档坐标
-        const y = Math.ceil(maxBottom + window.scrollY);
-
-        // 给一点点 buffer，避免最后一行被截掉
-        return y + 8;
-      })()
-    `,
+    expression,
     returnByValue: true,
   });
+  return result?.value;
+}
 
-  return Math.max(1, result.value || 1);
+async function getViewportSize(tabId) {
+  return await evalInPage(
+    tabId,
+    `(() => ({
+      width: Math.max(window.innerWidth, document.documentElement.clientWidth),
+      height: Math.max(window.innerHeight, document.documentElement.clientHeight)
+    }))()`
+  );
+}
+
+async function getVisibleBottomY(tabId) {
+  return await evalInPage(
+    tabId,
+    `(() => {
+      const els = Array.from(document.querySelectorAll("body *"));
+      let max = 0;
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) max = Math.max(max, r.bottom);
+      }
+      return Math.ceil(max + window.scrollY + 16); // 多给点 buffer
+    })()`
+  );
+}
+
+// 关键：滚动触发懒加载，直到高度不再增长（或达到上限）
+async function preScrollToLoad(tabId, maxRounds = 12) {
+  let last = 0;
+  for (let i = 0; i < maxRounds; i++) {
+    await evalInPage(
+      tabId,
+      `window.scrollTo(0, document.body.scrollHeight); document.body.scrollHeight;`
+    );
+    await sleep(450); // 等懒加载
+    const h = await evalInPage(tabId, `document.body.scrollHeight`);
+    if (h && Math.abs(h - last) < 40) break; // 高度稳定
+    last = h || last;
+  }
+  // 回到顶部（你要分析主页就保持 top 视角）
+  await evalInPage(tabId, `window.scrollTo(0, 0); true;`);
+  await sleep(250);
 }
 
 async function captureFullPagePngDataUrl(tabId) {
   return withDebugger(tabId, async () => {
-    // 1) 获取布局 metrics（主要用 width）
-    const { contentSize } = await cdpSend(tabId, "Page.getLayoutMetrics");
-    const fullWidth = Math.max(1, Math.ceil(contentSize.width));
+    // 1) 先滚到底，触发懒加载（防止 visibleBottom 算小）
+    await preScrollToLoad(tabId, 12);
 
-    // 2) 用可见内容计算“真实高度”，避免 contentSize.height 虚高
+    // 2) 取“真实视觉宽度”
+    const viewport = await getViewportSize(tabId);
+
+    // 3) 取“可见内容真实底部”
     const visibleHeight = await getVisibleBottomY(tabId);
 
-    // 3) 记住原窗口尺寸，结束后恢复
     const tab = await chrome.tabs.get(tabId);
-    const originalWidth = tab.width || 1280;
-    const originalHeight = tab.height || 720;
+    const originalWidth = tab.width || viewport.width || 1280;
+    const originalHeight = tab.height || viewport.height || 720;
 
-    // 4) 设成一个足够大的 viewport（宽按页面， 高按可见内容）
+    // 4) 设置 viewport（高度至少要能容纳截屏，但也做上限）
+    const targetHeight = Math.min(Math.max(originalHeight, visibleHeight), 45000);
+
     await cdpSend(tabId, "Emulation.setDeviceMetricsOverride", {
       mobile: false,
-      width: fullWidth,
-      height: Math.max(originalHeight, Math.min(visibleHeight, 30000)), // 防止极端页面无限高
+      width: viewport.width,
+      height: targetHeight,
       deviceScaleFactor: 1,
       screenOrientation: { angle: 0, type: "portraitPrimary" },
     });
 
-    await sleep(200);
+    await sleep(250);
 
-    // 5) 用 clip 精确裁剪到“可见内容高度”，彻底去白边
+    // 5) 用 clip 裁剪到 visibleHeight，避免白边也避免截断
     const { data } = await cdpSend(tabId, "Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
       clip: {
         x: 0,
         y: 0,
-        width: fullWidth,
-        height: Math.min(visibleHeight, 30000), // 同样做上限保护
+        width: viewport.width,
+        height: Math.min(visibleHeight, 45000),
         scale: 1,
       },
     });
 
-    // 6) restore
+    // restore
     await cdpSend(tabId, "Emulation.setDeviceMetricsOverride", {
       mobile: false,
       width: originalWidth,
