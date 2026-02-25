@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Dark Pattern Auditor",
+  "version": "1.0",
+  "description": "Audits and analyzes dark patterns on web pages. Exports prompt markdown with truncated HTML and screenshot for research use.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads",
+    "tabs",
+    "nativeMessaging",
+    "debugger"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Dark Pattern Injection"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": [
+        "utils/htmlExtraction.js",
+        "utils/websiteTemplates.js",
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
